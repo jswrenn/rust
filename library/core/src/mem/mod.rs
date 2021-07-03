@@ -21,6 +21,10 @@ mod maybe_uninit;
 #[stable(feature = "maybe_uninit", since = "1.36.0")]
 pub use maybe_uninit::MaybeUninit;
 
+mod transmutability;
+#[unstable(feature = "transmutability", issue = "none")]
+pub use transmutability::{Assume, BikeshedIntrinsicFrom};
+
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(inline)]
 pub use crate::intrinsics::transmute;

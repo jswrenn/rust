@@ -209,6 +209,10 @@ language_item_table! {
     /// The associated item of the [`DiscriminantKind`] trait.
     Discriminant,            sym::discriminant_type,   discriminant_type,          Target::AssocTy;
 
+    // language items relating to transmutability
+    TransmuteTrait,          sym::transmute_trait,     transmute_trait,            Target::Trait;
+    TransmuteOpts,           sym::transmute_opts,      transmute_opts,             Target::Struct;
+
     PointeeTrait,            sym::pointee_trait,       pointee_trait,              Target::Trait;
     Metadata,                sym::metadata_type,       metadata_type,              Target::AssocTy;
     DynMetadata,             sym::dyn_metadata,        dyn_metadata,               Target::Struct;

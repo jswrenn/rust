@@ -1233,6 +1233,8 @@ symbols! {
         track_caller,
         trait_alias,
         transmute,
+        transmute_opts,
+        transmute_trait,
         transparent,
         transparent_enums,
         transparent_unions,
