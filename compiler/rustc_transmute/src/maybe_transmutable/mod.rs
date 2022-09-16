@@ -213,21 +213,26 @@ where
                     Answer::No(Reason::DstIsTooBig)
                 }
             } else {
-                let src_quantification = if self.assume.validity {
-                    // if the compiler may assume that the programmer is doing additional validity checks,
-                    // (e.g.: that `src != 3u8` when the destination type is `bool`)
-                    // then there must exist at least one transition out of `src_state` such that the transmute is viable...
-                    there_exists
-                } else {
-                    // if the compiler cannot assume that the programmer is doing additional validity checks,
-                    // then for all transitions out of `src_state`, such that the transmute is viable...
-                    // then there must exist at least one transition out of `src_state` such that the transmute is viable...
-                    for_all
-                };
+                // How should we reduce potential paths through the types into answers about transmutability?
+                let (initial, operator, is_anihilator): (_, fn(_, _) -> _, for<'a> fn(&'a _) -> _) =
+                    if self.assume.validity {
+                        // if the compiler may assume that the programmer is doing additional validity checks,
+                        // (e.g.: that `src != 3u8` when the destination type is `bool`)
+                        // then there must exist at least one transition out of `src_state` such that the transmute is viable...
+                        (Answer::No(Reason::DstIsBitIncompatible), Answer::or, Answer::is_yes)
+                    } else {
+                        // if the compiler cannot assume that the programmer is doing additional validity checks,
+                        // then for all transitions out of `src_state`, such that the transmute is viable...
+                        // then there must exist at least one transition out of `src_state` such that the transmute is viable...
+                        (Answer::Yes, Answer::and, Answer::is_no)
+                    };
 
-                src_quantification(
-                    self.src.bytes_from(src_state).unwrap_or(&Map::default()),
-                    |(&src_validity, &src_state_prime)| {
+                let via_bytes = self
+                    .src
+                    .bytes_from(src_state)
+                    .unwrap_or(&Map::default())
+                    .into_iter()
+                    .map(|(&src_validity, &src_state_prime)| {
                         if let Some(dst_state_prime) = self.dst.byte_from(dst_state, src_validity) {
                             self.answer_memo(cache, src_state_prime, dst_state_prime)
                         } else if let Some(dst_state_prime) =
@@ -237,8 +242,33 @@ where
                         } else {
                             Answer::No(Reason::DstIsBitIncompatible)
                         }
-                    },
-                )
+                    })
+                    .reduce_answers(initial, operator, is_anihilator);
+
+                if is_anihilator(&via_bytes) {
+                    return via_bytes;
+                }
+
+                self.src
+                    .refs_from(src_state)
+                    .unwrap_or(&Map::default())
+                    .into_iter()
+                    .map(|(&src_ref, &src_state_prime)| {
+                        self.dst
+                            .refs_from(dst_state)
+                            .unwrap_or(&Map::default())
+                            .into_iter()
+                            .map(|(&dst_ref, &dst_state_prime)| {
+                                Answer::IfTransmutable { src: src_ref, dst: dst_ref }
+                                    .and(self.answer_memo(cache, src_state_prime, dst_state_prime))
+                            })
+                            .reduce_answers(
+                                Answer::No(Reason::DstIsBitIncompatible),
+                                Answer::or,
+                                Answer::is_yes,
+                            )
+                    })
+                    .reduce_answers(via_bytes, operator, is_anihilator)
             };
             cache.insert((src_state, dst_state), answer.clone());
             answer
@@ -252,7 +282,7 @@ where
 {
     pub(crate) fn and(self, rhs: Self) -> Self {
         match (self, rhs) {
-            (Self::No(reason), _) | (_, Self::No(reason)) => Self::No(reason),
+            (_, Self::No(reason)) | (Self::No(reason), _) => Self::No(reason),
             (Self::Yes, Self::Yes) => Self::Yes,
             (Self::IfAll(mut lhs), Self::IfAll(ref mut rhs)) => {
                 lhs.append(rhs);
@@ -285,36 +315,29 @@ where
     }
 }
 
-pub fn for_all<R, I, F>(iter: I, f: F) -> Answer<R>
+trait IterExt<R>: Iterator<Item = Answer<R>>
 where
     R: layout::Ref,
-    I: IntoIterator,
-    F: FnMut(<I as IntoIterator>::Item) -> Answer<R>,
+    Self: Sized,
 {
-    use std::ops::ControlFlow::{Break, Continue};
-    let (Continue(result) | Break(result)) =
-        iter.into_iter().map(f).try_fold(Answer::Yes, |constraints, constraint| {
-            match constraint.and(constraints) {
-                Answer::No(reason) => Break(Answer::No(reason)),
-                maybe => Continue(maybe),
-            }
+    fn reduce_answers(
+        mut self,
+        initial: Answer<R>,
+        operator: impl Fn(Answer<R>, Answer<R>) -> Answer<R>,
+        is_anihilator: impl Fn(&Answer<R>) -> bool,
+    ) -> Answer<R> {
+        use std::ops::ControlFlow::{Break, Continue};
+        let (Continue(result) | Break(result)) = self.try_fold(initial, |answers, answer| {
+            let answer = operator(answers, answer);
+            if is_anihilator(&answer) { Break(answer) } else { Continue(answer) }
         });
-    result
+        result
+    }
 }
 
-pub fn there_exists<R, I, F>(iter: I, f: F) -> Answer<R>
+impl<R, I> IterExt<R> for I
 where
     R: layout::Ref,
-    I: IntoIterator,
-    F: FnMut(<I as IntoIterator>::Item) -> Answer<R>,
+    I: Iterator<Item = Answer<R>>,
 {
-    use std::ops::ControlFlow::{Break, Continue};
-    let (Continue(result) | Break(result)) = iter.into_iter().map(f).try_fold(
-        Answer::No(Reason::DstIsBitIncompatible),
-        |constraints, constraint| match constraint.or(constraints) {
-            Answer::Yes => Break(Answer::Yes),
-            maybe => Continue(maybe),
-        },
-    );
-    result
 }

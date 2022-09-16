@@ -41,6 +41,21 @@ where
     IfAny(Vec<Answer<R>>),
 }
 
+impl<R> Answer<R>
+where
+    R: layout::Ref,
+{
+    /// Is this answer `Yes`?
+    pub(crate) fn is_yes(&self) -> bool {
+        matches!(&self, Self::Yes)
+    }
+
+    /// Is this answer `No`?
+    pub(crate) fn is_no(&self) -> bool {
+        matches!(&self, Self::No(..))
+    }
+}
+
 /// Answers: Why wasn't the source type transmutable into the destination type?
 #[derive(Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
 pub enum Reason {
