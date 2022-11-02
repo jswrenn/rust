@@ -213,19 +213,19 @@ where
                     Answer::No(Reason::DstIsTooBig)
                 }
             } else {
-                let src_quantification = if self.assume.validity {
+                let src_quantifier = if self.assume.validity {
                     // if the compiler may assume that the programmer is doing additional validity checks,
                     // (e.g.: that `src != 3u8` when the destination type is `bool`)
                     // then there must exist at least one transition out of `src_state` such that the transmute is viable...
-                    there_exists
+                    Quantifier::ThereExists
                 } else {
                     // if the compiler cannot assume that the programmer is doing additional validity checks,
                     // then for all transitions out of `src_state`, such that the transmute is viable...
-                    // then there must exist at least one transition out of `src_state` such that the transmute is viable...
-                    for_all
+                    // then there must exist at least one transition out of `dst_state` such that the transmute is viable...
+                    Quantifier::ForAll
                 };
 
-                src_quantification(
+                let bytes_answer = src_quantifier.apply(
                     self.src.bytes_from(src_state).unwrap_or(&Map::default()),
                     |(&src_validity, &src_state_prime)| {
                         if let Some(dst_state_prime) = self.dst.byte_from(dst_state, src_validity) {
@@ -238,7 +238,25 @@ where
                             Answer::No(Reason::DstIsBitIncompatible)
                         }
                     },
-                )
+                );
+
+                let refs_answer = src_quantification(
+                    self.src.refs_from(src_state).unwrap(),
+                    |(&src_validity, &src_state_prime)| {
+                        there_exists(self.dst.refs_from(dst_state),
+                            |(&dst_validity, &dst_state_prime)| {
+                                Answer::IfTransmutable {
+                                    src: src_validity,
+                                    dst: dst_validity,
+                                }.and(self.answer_memo(cache, src_state_prime, dst_state_prime))
+                            })
+                        });
+
+                if self.assume.validity {
+                    byte_answer.or(refs_answer)
+                } else {
+                    byte_answer.and(refs_answer)
+                }
             };
             cache.insert((src_state, dst_state), answer.clone());
             answer
@@ -285,6 +303,8 @@ where
     }
 }
 
+struct ForAll;
+
 pub fn for_all<R, I, F>(iter: I, f: F) -> Answer<R>
 where
     R: layout::Ref,
@@ -317,4 +337,38 @@ where
         },
     );
     result
+}
+
+enum Quantifier {
+    ThereExists,
+    ForAll,
+}
+
+impl Quantifier {
+    fn apply<R, I, F>(&self, iter: I, f: F) -> Answer<R>
+    where
+        R: layout::Ref,
+        I: IntoIterator,
+        F: FnMut(<I as IntoIterator>::Item) -> Answer<R>,
+    {
+        use std::ops::ControlFlow::{Break, Continue};
+
+        let (init, try_fold_f): (_, fn(_, _) -> _) = match self {
+            Self::ThereExists => {
+                (Answer::No(Reason::DstIsBitIncompatible), |accum: Answer<R>, next| {
+                    match accum.or(next) {
+                        Answer::Yes => Break(Answer::Yes),
+                        maybe => Continue(maybe),
+                    }
+                })
+            }
+            Self::ForAll => (Answer::Yes, |accum: Answer<R>, next| match accum.and(next) {
+                Answer::No(reason) => Break(Answer::No(reason)),
+                maybe => Continue(maybe),
+            }),
+        };
+
+        let (Continue(result) | Break(result)) = iter.into_iter().map(f).try_fold(init, try_fold_f);
+        result
+    }
 }

@@ -50,7 +50,7 @@ mod bool {
             #[cfg(feature = "rustc")]
             let mut set = Set::default();
             #[cfg(not(feature = "rustc"))]
-            let mut set = Set::new();
+            let mut set = Set::default();
             set.extend(alts);
             set
         };

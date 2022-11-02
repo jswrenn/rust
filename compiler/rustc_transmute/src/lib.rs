@@ -41,6 +41,19 @@ where
     IfAny(Vec<Answer<R>>),
 }
 
+impl Answer<R>
+where
+    R: layout::Ref
+{
+    fn for_each<F>(f: F)
+    where
+        F: FnMut()
+    {
+
+    }
+
+}
+
 /// Answers: Why wasn't the source type transmutable into the destination type?
 #[derive(Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
 pub enum Reason {
