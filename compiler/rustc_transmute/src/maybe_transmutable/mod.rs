@@ -1,13 +1,13 @@
-use crate::Map;
-use crate::{Answer, Reason};
-
+mod query_context;
 #[cfg(test)]
 mod tests;
 
-mod query_context;
-use query_context::QueryContext;
+use crate::{
+    layout::{self, dfa, Byte, Dfa, Nfa, Tree, Uninhabited},
+    maybe_transmutable::query_context::QueryContext,
+    Answer, Map, Reason,
+};
 
-use crate::layout::{self, dfa, Byte, Dfa, Nfa, Tree, Uninhabited};
 pub(crate) struct MaybeTransmutableQuery<L, C>
 where
     C: QueryContext,
@@ -226,37 +226,43 @@ where
                 };
 
                 let bytes_answer = src_quantifier.apply(
-                    self.src.bytes_from(src_state).unwrap_or(&Map::default()),
-                    |(&src_validity, &src_state_prime)| {
-                        if let Some(dst_state_prime) = self.dst.byte_from(dst_state, src_validity) {
-                            self.answer_memo(cache, src_state_prime, dst_state_prime)
-                        } else if let Some(dst_state_prime) =
-                            self.dst.byte_from(dst_state, Byte::Uninit)
-                        {
-                            self.answer_memo(cache, src_state_prime, dst_state_prime)
-                        } else {
-                            Answer::No(Reason::DstIsBitIncompatible)
-                        }
-                    },
+                    self.src.bytes_from(src_state).unwrap_or(&Map::default()).into_iter().map(
+                        |(&src_validity, &src_state_prime)| {
+                            if let Some(dst_state_prime) =
+                                self.dst.byte_from(dst_state, src_validity)
+                            {
+                                self.answer_memo(cache, src_state_prime, dst_state_prime)
+                            } else if let Some(dst_state_prime) =
+                                self.dst.byte_from(dst_state, Byte::Uninit)
+                            {
+                                self.answer_memo(cache, src_state_prime, dst_state_prime)
+                            } else {
+                                Answer::No(Reason::DstIsBitIncompatible)
+                            }
+                        },
+                    ),
                 );
 
-                let refs_answer = src_quantification(
-                    self.src.refs_from(src_state).unwrap(),
-                    |(&src_validity, &src_state_prime)| {
-                        there_exists(self.dst.refs_from(dst_state),
-                            |(&dst_validity, &dst_state_prime)| {
-                                Answer::IfTransmutable {
-                                    src: src_validity,
-                                    dst: dst_validity,
-                                }.and(self.answer_memo(cache, src_state_prime, dst_state_prime))
-                            })
-                        });
+                // let refs_answer = src_quantifier.apply(
+                //     self.src.refs_from(src_state).unwrap(),
+                //     |(&src_validity, &src_state_prime)| {
+                //         Quantifier::ThereExists.apply(
+                //             self.dst.refs_from(dst_state),
+                //             |(&dst_validity, &dst_state_prime)| {
+                //                 Answer::IfTransmutable { src: src_validity, dst: dst_validity }
+                //                     .and(self.answer_memo(cache, src_state_prime, dst_state_prime))
+                //             },
+                //         )
+                //     },
+                // );
 
-                if self.assume.validity {
-                    byte_answer.or(refs_answer)
-                } else {
-                    byte_answer.and(refs_answer)
-                }
+                // if self.assume.validity {
+                //     bytes_answer.or(refs_answer)
+                // } else {
+                //     bytes_answer.and(refs_answer)
+                // }
+
+                todo!()
             };
             cache.insert((src_state, dst_state), answer.clone());
             answer
@@ -339,17 +345,16 @@ where
     result
 }
 
-enum Quantifier {
+pub enum Quantifier {
     ThereExists,
     ForAll,
 }
 
 impl Quantifier {
-    fn apply<R, I, F>(&self, iter: I, f: F) -> Answer<R>
+    pub fn apply<R, I>(&self, iter: I) -> Answer<R>
     where
         R: layout::Ref,
-        I: IntoIterator,
-        F: FnMut(<I as IntoIterator>::Item) -> Answer<R>,
+        I: IntoIterator<Item = Answer<R>>,
     {
         use std::ops::ControlFlow::{Break, Continue};
 
@@ -368,7 +373,7 @@ impl Quantifier {
             }),
         };
 
-        let (Continue(result) | Break(result)) = iter.into_iter().map(f).try_fold(init, try_fold_f);
+        let (Continue(result) | Break(result)) = iter.into_iter().try_fold(init, try_fold_f);
         result
     }
 }

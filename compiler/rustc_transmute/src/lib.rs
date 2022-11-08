@@ -1,4 +1,11 @@
-#![feature(alloc_layout_extra, control_flow_enum, decl_macro, iterator_try_reduce, never_type)]
+#![feature(
+    alloc_layout_extra,
+    control_flow_enum,
+    decl_macro,
+    iterator_try_reduce,
+    never_type,
+    if_let_guard
+)]
 #![allow(dead_code, unused_variables)]
 #![deny(rustc::untranslatable_diagnostic)]
 #![deny(rustc::diagnostic_outside_of_impl)]
@@ -6,10 +13,11 @@
 #[macro_use]
 extern crate tracing;
 
-pub(crate) use rustc_data_structures::fx::{FxIndexMap as Map, FxIndexSet as Set};
+use rustc_data_structures::fx::{FxIndexMap as Map, FxIndexSet as Set};
 
-pub(crate) mod layout;
-pub(crate) mod maybe_transmutable;
+mod fixed_point;
+mod layout;
+mod maybe_transmutable;
 
 #[derive(Default)]
 pub struct Assume {
@@ -17,6 +25,12 @@ pub struct Assume {
     pub lifetimes: bool,
     pub safety: bool,
     pub validity: bool,
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Clone)]
+pub struct IfTransmutable<R> {
+    from: R,
+    into: R,
 }
 
 /// The type encodes answers to the question: "Are these types transmutable?"
@@ -32,26 +46,13 @@ where
     No(Reason),
 
     /// `Src` is transmutable into `Dst`, if `src` is transmutable into `dst`.
-    IfTransmutable { src: R, dst: R },
+    IfTransmutable(IfTransmutable<R>),
 
     /// `Src` is transmutable into `Dst`, if all of the enclosed requirements are met.
     IfAll(Vec<Answer<R>>),
 
     /// `Src` is transmutable into `Dst` if any of the enclosed requirements are met.
     IfAny(Vec<Answer<R>>),
-}
-
-impl Answer<R>
-where
-    R: layout::Ref
-{
-    fn for_each<F>(f: F)
-    where
-        F: FnMut()
-    {
-
-    }
-
 }
 
 /// Answers: Why wasn't the source type transmutable into the destination type?
