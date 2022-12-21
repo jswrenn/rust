@@ -47,10 +47,7 @@ mod bool {
         };
 
         let into_set = |alts: Vec<_>| {
-            #[cfg(feature = "rustc")]
             let mut set = Set::default();
-            #[cfg(not(feature = "rustc"))]
-            let mut set = Set::new();
             set.extend(alts);
             set
         };

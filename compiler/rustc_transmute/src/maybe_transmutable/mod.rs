@@ -213,64 +213,92 @@ where
                     Answer::No(Reason::DstIsTooBig)
                 }
             } else {
-                // How should we reduce potential paths through the types into answers about transmutability?
-                let (initial, operator, is_anihilator): (_, fn(_, _) -> _, for<'a> fn(&'a _) -> _) =
-                    if self.assume.validity {
-                        // if the compiler may assume that the programmer is doing additional validity checks,
-                        // (e.g.: that `src != 3u8` when the destination type is `bool`)
-                        // then there must exist at least one transition out of `src_state` such that the transmute is viable...
-                        (Answer::No(Reason::DstIsBitIncompatible), Answer::or, Answer::is_yes)
-                    } else {
-                        // if the compiler cannot assume that the programmer is doing additional validity checks,
-                        // then for all transitions out of `src_state`, such that the transmute is viable...
-                        // then there must exist at least one transition out of `src_state` such that the transmute is viable...
-                        (Answer::Yes, Answer::and, Answer::is_no)
-                    };
+                let src_quantifier = if self.assume.validity {
+                    // if the compiler may assume that the programmer is doing additional validity checks,
+                    // (e.g.: that `src != 3u8` when the destination type is `bool`)
+                    // then there must exist at least one transition out of `src_state` such that the transmute is viable...
+                    Quantifier::ThereExists
+                } else {
+                    // if the compiler cannot assume that the programmer is doing additional validity checks,
+                    // then for all transitions out of `src_state`, such that the transmute is viable...
+                    // then there must exist at least one transition out of `dst_state` such that the transmute is viable...
+                    Quantifier::ForAll
+                };
 
-                let via_bytes = self
-                    .src
-                    .bytes_from(src_state)
-                    .unwrap_or(&Map::default())
-                    .into_iter()
-                    .map(|(&src_validity, &src_state_prime)| {
-                        if let Some(dst_state_prime) = self.dst.byte_from(dst_state, src_validity) {
-                            self.answer_memo(cache, src_state_prime, dst_state_prime)
-                        } else if let Some(dst_state_prime) =
-                            self.dst.byte_from(dst_state, Byte::Uninit)
-                        {
-                            self.answer_memo(cache, src_state_prime, dst_state_prime)
-                        } else {
-                            Answer::No(Reason::DstIsBitIncompatible)
-                        }
-                    })
-                    .reduce_answers(initial, operator, is_anihilator);
+                let bytes_answer = src_quantifier.apply(
+                    // for each of the byte transitions out of the `src_state`...
+                    self.src.bytes_from(src_state).unwrap_or(&Map::default()).into_iter().map(
+                        |(&src_validity, &src_state_prime)| {
+                            // ...try to find a matching transition out of `dst_state`.
+                            if let Some(dst_state_prime) =
+                                self.dst.byte_from(dst_state, src_validity)
+                            {
+                                self.answer_memo(cache, src_state_prime, dst_state_prime)
+                            } else if let Some(dst_state_prime) =
+                                // otherwise, see if `dst_state` has any outgoing `Uninit` transitions
+                                // (any init byte is a valid uninit byte)
+                                self.dst.byte_from(dst_state, Byte::Uninit)
+                            {
+                                self.answer_memo(cache, src_state_prime, dst_state_prime)
+                            } else {
+                                // otherwise, we've exhausted our options.
+                                // the DFAs, from this point onwards, are bit-incompatible.
+                                Answer::No(Reason::DstIsBitIncompatible)
+                            }
+                        },
+                    ),
+                );
 
-                if is_anihilator(&via_bytes) {
-                    return via_bytes;
-                }
+                // The below early returns reflect how this code would behave:
+                //   if self.assume.validity {
+                //       bytes_answer.or(refs_answer)
+                //   } else {
+                //       bytes_answer.and(refs_answer)
+                //   }
+                // ...if `refs_answer` was computed lazily. The below early
+                // returns can be deleted without impacting the correctness of
+                // the algoritm; only its performance.
+                match bytes_answer {
+                    Answer::No(..) if !self.assume.validity => return bytes_answer,
+                    Answer::Yes if self.assume.validity => return bytes_answer,
+                    _ => {}
+                };
 
-                self.src
-                    .refs_from(src_state)
-                    .unwrap_or(&Map::default())
-                    .into_iter()
-                    .map(|(&src_ref, &src_state_prime)| {
-                        self.dst
-                            .refs_from(dst_state)
-                            .unwrap_or(&Map::default())
-                            .into_iter()
-                            .map(|(&dst_ref, &dst_state_prime)| {
-                                Answer::IfTransmutable { src: src_ref, dst: dst_ref }
-                                    .and(self.answer_memo(cache, src_state_prime, dst_state_prime))
-                            })
-                            .reduce_answers(
-                                Answer::No(Reason::DstIsBitIncompatible),
-                                Answer::or,
-                                Answer::is_yes,
+                let refs_answer = src_quantifier.apply(
+                    // for each reference transition out of `src_state`...
+                    self.src.refs_from(src_state).unwrap_or(&Map::default()).into_iter().map(
+                        |(&src_ref, &src_state_prime)| {
+                            // ...there exists a reference transition out of `dst_state`...
+                            Quantifier::ThereExists.apply(
+                                self.dst
+                                    .refs_from(dst_state)
+                                    .unwrap_or(&Map::default())
+                                    .into_iter()
+                                    .map(|(&dst_ref, &dst_state_prime)| {
+                                        // ...such that `src` is transmutable into `dst`, if
+                                        // `src_ref` is transmutability into `dst_ref`.
+                                        Answer::IfTransmutable { src: src_ref, dst: dst_ref }.and(
+                                            self.answer_memo(
+                                                cache,
+                                                src_state_prime,
+                                                dst_state_prime,
+                                            ),
+                                        )
+                                    }),
                             )
-                    })
-                    .reduce_answers(via_bytes, operator, is_anihilator)
+                        },
+                    ),
+                );
+
+                if self.assume.validity {
+                    bytes_answer.or(refs_answer)
+                } else {
+                    bytes_answer.and(refs_answer)
+                }
             };
-            cache.insert((src_state, dst_state), answer.clone());
+            if let Some(..) = cache.insert((src_state, dst_state), answer.clone()) {
+                panic!("failed to correctly cache transmutability")
+            }
             answer
         }
     }
@@ -282,7 +310,7 @@ where
 {
     pub(crate) fn and(self, rhs: Self) -> Self {
         match (self, rhs) {
-            (_, Self::No(reason)) | (Self::No(reason), _) => Self::No(reason),
+            (Self::No(reason), _) | (_, Self::No(reason)) => Self::No(reason),
             (Self::Yes, Self::Yes) => Self::Yes,
             (Self::IfAll(mut lhs), Self::IfAll(ref mut rhs)) => {
                 lhs.append(rhs);
@@ -315,29 +343,71 @@ where
     }
 }
 
-trait IterExt<R>: Iterator<Item = Answer<R>>
+struct ForAll;
+
+pub fn for_all<R, I, F>(iter: I, f: F) -> Answer<R>
 where
     R: layout::Ref,
-    Self: Sized,
+    I: IntoIterator,
+    F: FnMut(<I as IntoIterator>::Item) -> Answer<R>,
 {
-    fn reduce_answers(
-        mut self,
-        initial: Answer<R>,
-        operator: impl Fn(Answer<R>, Answer<R>) -> Answer<R>,
-        is_anihilator: impl Fn(&Answer<R>) -> bool,
-    ) -> Answer<R> {
-        use std::ops::ControlFlow::{Break, Continue};
-        let (Continue(result) | Break(result)) = self.try_fold(initial, |answers, answer| {
-            let answer = operator(answers, answer);
-            if is_anihilator(&answer) { Break(answer) } else { Continue(answer) }
+    use std::ops::ControlFlow::{Break, Continue};
+    let (Continue(result) | Break(result)) =
+        iter.into_iter().map(f).try_fold(Answer::Yes, |constraints, constraint| {
+            match constraint.and(constraints) {
+                Answer::No(reason) => Break(Answer::No(reason)),
+                maybe => Continue(maybe),
+            }
         });
-        result
-    }
+    result
 }
 
-impl<R, I> IterExt<R> for I
+pub fn there_exists<R, I, F>(iter: I, f: F) -> Answer<R>
 where
     R: layout::Ref,
-    I: Iterator<Item = Answer<R>>,
+    I: IntoIterator,
+    F: FnMut(<I as IntoIterator>::Item) -> Answer<R>,
 {
+    use std::ops::ControlFlow::{Break, Continue};
+    let (Continue(result) | Break(result)) = iter.into_iter().map(f).try_fold(
+        Answer::No(Reason::DstIsBitIncompatible),
+        |constraints, constraint| match constraint.or(constraints) {
+            Answer::Yes => Break(Answer::Yes),
+            maybe => Continue(maybe),
+        },
+    );
+    result
+}
+
+pub enum Quantifier {
+    ThereExists,
+    ForAll,
+}
+
+impl Quantifier {
+    pub fn apply<R, I>(&self, iter: I) -> Answer<R>
+    where
+        R: layout::Ref,
+        I: IntoIterator<Item = Answer<R>>,
+    {
+        use std::ops::ControlFlow::{Break, Continue};
+
+        let (init, try_fold_f): (_, fn(_, _) -> _) = match self {
+            Self::ThereExists => {
+                (Answer::No(Reason::DstIsBitIncompatible), |accum: Answer<R>, next| {
+                    match accum.or(next) {
+                        Answer::Yes => Break(Answer::Yes),
+                        maybe => Continue(maybe),
+                    }
+                })
+            }
+            Self::ForAll => (Answer::Yes, |accum: Answer<R>, next| match accum.and(next) {
+                Answer::No(reason) => Break(Answer::No(reason)),
+                maybe => Continue(maybe),
+            }),
+        };
+
+        let (Continue(result) | Break(result)) = iter.into_iter().try_fold(init, try_fold_f);
+        result
+    }
 }
